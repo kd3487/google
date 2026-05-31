@@ -2,31 +2,34 @@ import datetime
 import pandas as pd
 
 from data.models import MarketSnapshot, OptionsChain, Zone, StrikeData
+from data.data_feed import fetch_real_nifty_data
 from strategy.filters import module_0_global_filters, module_1_event_filter, module_2_expiry_filter
 from strategy.engine import module_3_market_mode, module_4_zone_scoring, module_5_cross_index, module_6_vwap_price_action, module_7_entry_gate
 from broker.paper_broker import PaperBroker
 
-def create_mock_snapshot() -> MarketSnapshot:
-    """Create a mock snapshot for testing."""
+def create_mock_snapshot(current_price: float, current_high: float, current_low: float, current_close: float, current_volume: float) -> MarketSnapshot:
+    """Create a mock snapshot for testing, but with real price data integration."""
     now = datetime.datetime.now()
     now = now.replace(hour=11, minute=45) # Set time to valid trading window
 
-    # Mock options chain
+    # Mock options chain (real options chain data requires active broker API)
+    # Adjust strikes near current real price
+    base_strike = round(current_price / 100) * 100
     strikes = {
-        21000.0: StrikeData(21000.0, 100000, 500000, 1000, 5000, 15.0),
-        21100.0: StrikeData(21100.0, 500000, 100000, 5000, 1000, 14.5),
+        float(base_strike): StrikeData(float(base_strike), 100000, 500000, 1000, 5000, 15.0),
+        float(base_strike + 100): StrikeData(float(base_strike + 100), 500000, 100000, 5000, 1000, 14.5),
     }
     oc = OptionsChain(now, now.date() + datetime.timedelta(days=3), strikes)
 
     return MarketSnapshot(
         timestamp=now,
         symbol="NIFTY",
-        price=21050.0,
-        high=21100.0,
-        low=21000.0,
-        close=21050.0,
-        volume=100000,
-        vwap=21045.0,
+        price=current_price,
+        high=current_high,
+        low=current_low,
+        close=current_close,
+        volume=current_volume,
+        vwap=current_price * 0.9995, # Mock VWAP slightly below price for testing
         options_chain=oc,
         net_oi_delta=-150000.0, # Negative -> Tail wind for BUY
         economic_event_today=False,
@@ -44,20 +47,30 @@ def main():
     # 1. Setup Broker
     broker = PaperBroker(initial_balance=100000.0)
 
-    # 2. Get Data Snapshot
-    snapshot = create_mock_snapshot()
+    # 2. Get Real Historical Price Data
+    print("Fetching real historical data for NIFTY (^NSEI)...")
+    history = fetch_real_nifty_data()
 
-    # Create Mock History
-    history = pd.DataFrame({
-        "close": [21000, 21010, 21030, 21040, 21050],
-        "high": [21020, 21030, 21050, 21060, 21070],
-        "low": [20980, 20990, 21000, 21020, 21030],
-        "volume": [50000, 60000, 55000, 70000, 100000]
-    })
+    if history.empty:
+        print("Failed to fetch real data. Exiting.")
+        return
 
-    # Mock Zone
+    latest_row = history.iloc[-1]
+    current_price = float(latest_row['close'])
+    current_high = float(latest_row['high'])
+    current_low = float(latest_row['low'])
+    current_close = float(latest_row['close'])
+    current_volume = float(latest_row['volume'])
+
+    print(f"Latest NIFTY Price: {current_price}")
+
+    # 3. Create Snapshot with Real Price
+    snapshot = create_mock_snapshot(current_price, current_high, current_low, current_close, current_volume)
+
+    # Mock Zone (adjust level to be near current real price)
+    zone_level = round(current_price / 100) * 100.0
     zone = Zone(
-        level=21000.0,
+        level=zone_level,
         zone_type="SUPPORT",
         wall_age_days=5,
         spans_2_expiries=True,
@@ -135,8 +148,8 @@ def main():
 
     if entry_decision == "ENTER":
         print("\n--- Executing Trade ---")
-        # Assume Stop Loss is below zone logic
-        sl_price = 20980.0
+        # Assume Stop Loss is below zone logic (using a 1% trailing stop calculation)
+        sl_price = snapshot.price * 0.99
         stop_loss_points = snapshot.price - sl_price
 
         qty = broker.calculate_position_size(
